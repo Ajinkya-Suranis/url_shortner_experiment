@@ -1,8 +1,11 @@
 import pymongo
+import sys
+from redisops import url_class
 from flask import Flask, request, render_template, redirect
 from urlops import get_tinyurl_string, create_tinyurl_letters
 
 app = Flask(__name__)
+redis_cli = None
 cli = pymongo.MongoClient("mongodb://localhost:27017/")
 db = cli["urldb"]
 col = db["urlcol"]
@@ -19,6 +22,7 @@ def make_tiny():
 
 @app.route('/<tinyurl>')
 def redirect_to_url(tinyurl):
+    print(tinyurl)
     ret = search_tinyurl(tinyurl)
     if ret == None:
         return "Error 404: The tiny URL %s not found", 404
@@ -45,7 +49,11 @@ def search_tinyurl(tinyurl):
 # else return None.
 
 def search_origurl(origurl):
-    global col
+    global col, redis_cli
+    result = redis_cli.get_tinyurl(origurl)
+    if result:
+        print("Found in redis!")
+        return result
     result = col.find_one({"orig": {"$eq": origurl}})
     if result == None:
         return None
@@ -56,8 +64,8 @@ def search_origurl(origurl):
 
 # Add a new entry
 def create_tinyurl(url):
-    global col
-    tinyurl_string = get_tinyurl_string(url, col)
+    global col, redis_cli
+    tinyurl_string = get_tinyurl_string(redis_cli, url, col)
     return tinyurl_string
 
 def makeittiny(url):
@@ -68,5 +76,10 @@ def makeittiny(url):
     return "http://localhost:5000/" + create_tinyurl(url)
 
 if __name__ == '__main__':
+    try:
+        redis_cli = url_class()
+    except Exception as e:
+        print(str(e))
+        sys.exit()
     create_tinyurl_letters(col)
     app.run(host='0.0.0.0')

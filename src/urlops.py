@@ -43,14 +43,14 @@ def create_tinyurl_letters(col):
 # characters as json object. input is mongodb
 # collection object. It assumes that the
 # document already exists in mongodb.
-def get_tinyurl_string(url, col):
+def get_tinyurl_string(redis_cli, url, col):
     global current_letters, orig_letters, TOTAL_CHARS, STR_LEN
-    i = random.randint(0, 5)
     prev_letters = current_letters[:]
     current_letters = gen_next_permutation(prev_letters, orig_letters, TOTAL_CHARS, STR_LEN)
     col.update_one({"current_letters": prev_letters}, {"$set": {"current_letters": current_letters}})
     url_string = ''
     for i in current_letters:
         url_string += url_char_mapping[i]
+    redis_cli.write_url_pair(url, url_string)
     col.insert_one({"orig": url, "tiny": url_string})
     return url_string

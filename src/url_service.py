@@ -55,6 +55,11 @@ if __name__ == '__main__':
     if algo == None:
         print("Failed to decide the algorithm. Exiting...")
         sys.exit()
+    try:
+        urlops.create_cron_daemon(algo)
+    except Exception as e:
+        print(str(e))
+        sys.exit()
     if algo == "sequential":
         urlops.create_tinyurl_letters()
     app.run(host='0.0.0.0')

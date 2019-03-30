@@ -3,22 +3,29 @@ import os
 import pymongo
 import hashlib
 import base64
+from collections import deque
 from char_mapping import url_char_mapping
 from permutations import gen_next_permutation
+from apscheduler.schedulers.background import BackgroundScheduler
+from apscheduler.triggers.cron import CronTrigger
 
 # 26 lower + 26 upper + 10 numbers = 62 letters
 TOTAL_CHARS = 62
+INSERT_LIMIT = 100
 STR_LEN = 6
 HASH_T2O = "tiny_to_orig"
 HASH_O2T = "orig_to_tiny"
+CRON_SCHED = "* * * * *"
 
 # Current, updated set of letters.
 current_letters = []
 orig_letters = []
+global_prev_letters = None
 
 cli = pymongo.MongoClient("mongodb://localhost:27017/")
 db = cli["urldb"]
 col = db["urlcol"]
+latest_url_mappings = deque()
 
 
 # get the hash of original URL.
@@ -44,12 +51,12 @@ def get_url_hash(origurl):
 # This is called only when the service
 # is being deployed for the first time.
 def create_random_letters(col):
-    global current_letters, orig_letters
+    global current_letters, orig_letters, global_prev_letters
     random_numbers = []
     for _i in range(0, 6):
         random_numbers.append(random.randint(1, TOTAL_CHARS - 1))
     current_letters = random_numbers
-    orig_letters = current_letters[:]
+    orig_letters = global_prev_letters = current_letters[:]
     doc = {"current_letters": random_numbers}
     col.insert_one(doc)
     return doc
@@ -60,13 +67,13 @@ def create_random_letters(col):
 # If not, create the json and write into collection.
 # If it already exists, return it.
 def create_tinyurl_letters():
-    global current_letters, orig_letters, col
+    global current_letters, orig_letters, col, global_prev_letters
     result = col.find({"current_letters": {"$exists": 1}})
     if result.count() > 0:
         # already created. just return
         for doc in result:
             current_letters = doc["current_letters"]
-            orig_letters = current_letters[:]
+            orig_letters = global_prev_letters = current_letters[:]
             return doc["current_letters"]
     return create_random_letters(col)
 
@@ -85,12 +92,10 @@ def get_tinyurl_string(algo, redis_cli, url):
         prev_letters = current_letters[:]
         current_letters = gen_next_permutation(prev_letters, orig_letters,
                                                 TOTAL_CHARS, STR_LEN)
-        col.update_one({"current_letters": prev_letters},
-                        {"$set": {"current_letters": current_letters}})
         for i in current_letters:
             url_string += url_char_mapping[i]
         redis_cli.seq_write_url_pair(HASH_O2T, HASH_T2O, url, url_string)
-    col.insert_one({"orig": url, "tiny": url_string})
+    latest_url_mappings.append({"orig": url, "tiny": url_string})
     return url_string
 
 # Search if the original url(long one) already exists
@@ -155,3 +160,42 @@ def get_algorithm():
         print(str(e))
         return None
     return algo
+
+
+# create a cron job to do the background flushing
+# of url mappings to mongodb.
+def create_cron_daemon(algo):
+    global sched
+    sched = BackgroundScheduler()
+    try:
+        sched.start()
+        _job = sched.add_job(flush_url_mappings, CronTrigger.from_crontab(CRON_SCHED), args=[algo])
+    except Exception:
+        raise
+
+
+def flush_url_mappings(algo):
+    global col, latest_url_mappings, current_letters, global_prev_letters
+    if len(latest_url_mappings) == 0:
+        return
+    count = 0
+    group_items = []
+    while True:
+        try:
+            item = latest_url_mappings.popleft()
+        except IndexError:
+            break
+        if count == INSERT_LIMIT:
+            col.insert(group_items)
+            if algo == "sequential":
+                # TODO: Take a lock before copying current_letters
+                local_current_letters = current_letters[:]
+                col.update_one({"current_letters": global_prev_letters},
+                        {"$set": {"current_letters": local_current_letters}})
+                global_prev_letters = local_current_letters[:]
+            count = 0
+            group_items = []
+        group_items.append(item)
+        count += 1
+    if group_items:
+        col.insert(group_items)
